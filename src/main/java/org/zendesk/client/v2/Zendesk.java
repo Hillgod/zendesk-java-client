@@ -68,6 +68,7 @@ public class Zendesk implements Closeable {
     private static final String JSON = "application/json; charset=UTF-8";
     private final boolean closeClient;
     private final AsyncHttpClient client;
+    private final RateLimiter rateLimiter;
     private final Realm realm;
     private final String url;
     private final String oauthToken;
@@ -106,7 +107,7 @@ public class Zendesk implements Closeable {
        return Collections.unmodifiableMap(result);
     }
 
-    private Zendesk(AsyncHttpClient client, String url, String username, String password) {    
+    private Zendesk(AsyncHttpClient client, String url, String username, String password, double maxRequestsPerSecond) {    
         this.logger = LoggerFactory.getLogger(Zendesk.class);
         this.closeClient = client == null;
         this.oauthToken = null;
@@ -126,10 +127,11 @@ public class Zendesk implements Closeable {
             this.realm = null;
         } 
         this.mapper = createMapper();
+        this.rateLimiter = maxRequestsPerSecond <= 0 ? null : RateLimiter.create(maxRequestsPerSecond);
     }
 
 
-    private Zendesk(AsyncHttpClient client, String url, String oauthToken) {
+    private Zendesk(AsyncHttpClient client, String url, String oauthToken, double maxRequestsPerSecond) {
         this.logger = LoggerFactory.getLogger(Zendesk.class);
         this.closeClient = client == null;
         this.realm = null;
@@ -142,6 +144,7 @@ public class Zendesk implements Closeable {
         }
 
         this.mapper = createMapper();
+        this.rateLimiter = maxRequestsPerSecond <= 0 ? null : RateLimiter.create(maxRequestsPerSecond);
     }
 
 
@@ -1157,6 +1160,14 @@ public class Zendesk implements Closeable {
             } else {
                 logger.debug("Request {} {}", request.getMethod(), request.getUrl());
             }
+            // Block at the rate, if one was defined.
+            if (rateLimiter != null) {
+                boolean tmp = rateLimiter.tryAcquire();
+                if (!tmp) {
+                    logger.info("We were rate limited by our client.");
+                }
+                rateLimiter.acquire();
+            }
             return client.executeRequest(request, handler);
         } catch (IOException e) {
             throw new ZendeskException(e.getMessage(), e);
@@ -1563,6 +1574,7 @@ public class Zendesk implements Closeable {
         private String password = null;
         private String token = null;
         private String oauthToken = null;
+        private double maxRequestsPerSecond = 0.0;
 
         public Builder(String url) {
             this.url = url;
@@ -1605,6 +1617,12 @@ public class Zendesk implements Closeable {
             }
             return this;
         }
+
+        
+        public Builder setMaxRequestsPerSecond(double maxRequestsPerSecond) {
+            this.maxRequestsPerSecond = maxRequestsPerSecond;
+            return this;
+        }
         
         
         public Builder setRetry(boolean retry) {
@@ -1613,11 +1631,11 @@ public class Zendesk implements Closeable {
 
         public Zendesk build() {
             if (token != null) {
-                return new Zendesk(client, url, username + "/token", token);
+                return new Zendesk(client, url, username + "/token", token, maxRequestsPerSecond);
             } else if (oauthToken != null) {
-                return new Zendesk(client, url, oauthToken);
+                return new Zendesk(client, url, oauthToken, maxRequestsPerSecond);
             }
-            return new Zendesk(client, url, username, password);
+            return new Zendesk(client, url, username, password, maxRequestsPerSecond);
         }
     }
 
